@@ -25,9 +25,13 @@ except ImportError:
     def get_optimized_whisper_params():
         return {
             "fp16": False,
-            "verbose": False,
+            "verbose": True,  # Enable verbose to see progress
             "word_timestamps": False,
             "condition_on_previous_text": False,
+            "temperature": 0,  # Use deterministic decoding
+            "compression_ratio_threshold": 2.4,  # Prevent infinite loops
+            "logprob_threshold": -1.0,  # More conservative threshold
+            "no_speech_threshold": 0.6,  # Higher threshold for silence
         }
 
 app = FastAPI(
@@ -175,15 +179,27 @@ async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile =
         # Transcribe audio using Whisper with optimized settings
         print("Starting transcription...")
         whisper_params = get_optimized_whisper_params()
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: whisper_model.transcribe(
-                temp_audio_path,
-                task="transcribe",
-                language=None,  # Auto-detect language
-                **whisper_params
+        
+        # Add timeout to prevent hanging
+        try:
+            result = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: whisper_model.transcribe(
+                        temp_audio_path,
+                        task="transcribe",
+                        language=None,  # Auto-detect language
+                        **whisper_params
+                    )
+                ),
+                timeout=300  # 5 minutes timeout
             )
-        )
+        except asyncio.TimeoutError:
+            cleanup_temp_files(temp_audio_path)
+            raise HTTPException(
+                status_code=408,
+                detail="Transcription timeout after 5 minutes. Try a shorter audio file or upgrade instance."
+            )
         
         print("Transcription completed")
         
