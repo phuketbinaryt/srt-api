@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: srt-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python start.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: WHISPER_MODEL
+        value: base
+      - key: MAX_FILE_SIZE_MB
+        value: 100
+      - key: CORS_ORIGINS
+        value: "*"
+    disk:
+      name: srt-api-disk
+      mountPath: /tmp
+      sizeGB: 1

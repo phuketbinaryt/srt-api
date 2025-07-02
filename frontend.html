@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Transcription API - Test Frontend</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-area {
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            margin: 20px 0;
+            transition: border-color 0.3s;
+        }
+        .upload-area:hover {
+            border-color: #007bff;
+        }
+        .upload-area.dragover {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .upload-btn {
+            background: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px;
+        }
+        .upload-btn:hover {
+            background: #0056b3;
+        }
+        .upload-btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .progress {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+            display: none;
+        }
+        .progress-bar {
+            height: 100%;
+            background: #007bff;
+            width: 0%;
+            transition: width 0.3s;
+            border-radius: 10px;
+        }
+        .file-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            display: none;
+        }
+        .supported-formats {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .supported-formats h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .format-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .format-tag {
+            background: #007bff;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 Audio Transcription API</h1>
+        <p style="text-align: center; color: #666;">Upload an audio file to generate SRT subtitles automatically</p>
+        
+        <div class="supported-formats">
+            <h3>Supported Formats</h3>
+            <div class="format-list">
+                <span class="format-tag">MP3</span>
+                <span class="format-tag">WAV</span>
+                <span class="format-tag">M4A</span>
+                <span class="format-tag">FLAC</span>
+                <span class="format-tag">OGG</span>
+                <span class="format-tag">WMA</span>
+            </div>
+            <p style="margin-top: 10px; font-size: 14px; color: #666;">Maximum file size: 100MB</p>
+        </div>
+
+        <div class="upload-area" id="uploadArea">
+            <p>📁 Drag and drop your audio file here</p>
+            <p>or</p>
+            <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                Choose File
+            </button>
+            <input type="file" id="fileInput" accept=".mp3,.wav,.m4a,.flac,.ogg,.wma" onchange="handleFileSelect(event)">
+        </div>
+
+        <div class="file-info" id="fileInfo"></div>
+
+        <div class="progress" id="progressContainer">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+
+        <button class="upload-btn" id="transcribeBtn" onclick="transcribeAudio()" disabled>
+            🎯 Transcribe Audio
+        </button>
+
+        <div class="status" id="status"></div>
+    </div>
+
+    <script>
+        let selectedFile = null;
+        const API_BASE_URL = 'http://localhost:8000';
+
+        // Drag and drop functionality
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                handleFile(file);
+            }
+        }
+
+        function handleFile(file) {
+            selectedFile = file;
+            
+            // Validate file type
+            const supportedFormats = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.wma'];
+            const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
+            
+            if (!supportedFormats.includes(fileExtension)) {
+                showStatus('error', `Unsupported file format: ${fileExtension}`);
+                return;
+            }
+
+            // Validate file size (100MB limit)
+            const maxSize = 100 * 1024 * 1024;
+            if (file.size > maxSize) {
+                showStatus('error', `File too large: ${(file.size / (1024*1024)).toFixed(1)}MB. Maximum size: 100MB`);
+                return;
+            }
+
+            // Show file info
+            const fileInfo = document.getElementById('fileInfo');
+            fileInfo.innerHTML = `
+                <strong>Selected File:</strong> ${file.name}<br>
+                <strong>Size:</strong> ${(file.size / (1024*1024)).toFixed(1)}MB<br>
+                <strong>Type:</strong> ${file.type || 'Unknown'}
+            `;
+            fileInfo.style.display = 'block';
+
+            // Enable transcribe button
+            document.getElementById('transcribeBtn').disabled = false;
+            hideStatus();
+        }
+
+        async function transcribeAudio() {
+            if (!selectedFile) {
+                showStatus('error', 'Please select an audio file first');
+                return;
+            }
+
+            const transcribeBtn = document.getElementById('transcribeBtn');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+
+            // Disable button and show progress
+            transcribeBtn.disabled = true;
+            transcribeBtn.textContent = '🔄 Transcribing...';
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+
+            showStatus('info', 'Uploading and transcribing audio file...');
+
+            try {
+                const formData = new FormData();
+                formData.append('file', selectedFile);
+
+                // Simulate progress (since we can't track actual upload progress easily)
+                let progress = 0;
+                const progressInterval = setInterval(() => {
+                    progress += Math.random() * 15;
+                    if (progress > 90) progress = 90;
+                    progressBar.style.width = progress + '%';
+                }, 500);
+
+                const response = await fetch(`${API_BASE_URL}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                clearInterval(progressInterval);
+                progressBar.style.width = '100%';
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const filename = selectedFile.name.replace(/\.[^/.]+$/, '') + '_subtitles.srt';
+                    
+                    // Download the SRT file
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+
+                    showStatus('success', `✅ Transcription completed! SRT file downloaded as: ${filename}`);
+                } else {
+                    const errorText = await response.text();
+                    showStatus('error', `Transcription failed: ${errorText}`);
+                }
+            } catch (error) {
+                showStatus('error', `Network error: ${error.message}. Make sure the API server is running on ${API_BASE_URL}`);
+            } finally {
+                // Reset UI
+                transcribeBtn.disabled = false;
+                transcribeBtn.textContent = '🎯 Transcribe Audio';
+                setTimeout(() => {
+                    progressContainer.style.display = 'none';
+                }, 1000);
+            }
+        }
+
+        function showStatus(type, message) {
+            const status = document.getElementById('status');
+            status.className = `status ${type}`;
+            status.textContent = message;
+            status.style.display = 'block';
+        }
+
+        function hideStatus() {
+            const status = document.getElementById('status');
+            status.style.display = 'none';
+        }
+
+        // Check API health on page load
+        window.addEventListener('load', async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/health`);
+                if (response.ok) {
+                    showStatus('success', '✅ API server is running and ready');
+                } else {
+                    showStatus('error', '❌ API server is not responding properly');
+                }
+            } catch (error) {
+                showStatus('error', `❌ Cannot connect to API server at ${API_BASE_URL}. Make sure it's running.`);
+            }
+        });
+    </script>
+</body>
+</html>
