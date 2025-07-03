@@ -60,14 +60,73 @@ SUPPORTED_FORMATS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma"}
 # Use instance-specific file size limit
 MAX_FILE_SIZE = instance_config["max_file_size_mb"] * 1024 * 1024
 
-def get_model():
-    """Lazy load the Whisper model to save memory"""
+async def get_model_async():
+    """Async wrapper for model loading with timeout"""
     global model
     if model is None:
         model_size = instance_config["whisper_model"]
         print(f"Loading Whisper model: {model_size} (optimized for current instance)")
-        model = whisper.load_model(model_size)
-        print("Model loaded successfully")
+        
+        try:
+            # Try loading with timeout
+            model = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: whisper.load_model(model_size)
+                ),
+                timeout=120  # 2 minutes timeout for model loading
+            )
+            print("Model loaded successfully")
+        except asyncio.TimeoutError:
+            print(f"Timeout loading {model_size} model, falling back to 'base'...")
+            try:
+                model = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: whisper.load_model("base")
+                    ),
+                    timeout=120
+                )
+                print("Base model loaded successfully")
+            except asyncio.TimeoutError:
+                print("Timeout loading base model, falling back to 'tiny'...")
+                model = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: whisper.load_model("tiny")
+                    ),
+                    timeout=60
+                )
+                print("Tiny model loaded successfully")
+        except Exception as e:
+            print(f"Failed to load {model_size} model: {e}")
+            print("Falling back to 'base' model...")
+            try:
+                model = whisper.load_model("base")
+                print("Base model loaded successfully")
+            except Exception as e2:
+                print(f"Failed to load base model: {e2}")
+                print("Falling back to 'tiny' model...")
+                model = whisper.load_model("tiny")
+                print("Tiny model loaded successfully")
+    return model
+
+def get_model():
+    """Lazy load the Whisper model to save memory"""
+    global model
+    if model is None:
+        # Force use of base model for reliability
+        model_size = "base"
+        print(f"Loading Whisper model: {model_size} (forced for reliability)")
+        
+        try:
+            model = whisper.load_model(model_size)
+            print("Model loaded successfully")
+        except Exception as e:
+            print(f"Failed to load {model_size} model: {e}")
+            print("Falling back to 'tiny' model...")
+            model = whisper.load_model("tiny")
+            print("Tiny model loaded successfully")
     return model
 
 def cleanup_temp_files(*file_paths):

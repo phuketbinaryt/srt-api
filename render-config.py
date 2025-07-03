@@ -47,7 +47,7 @@ def get_instance_config():
     else:  # starter or default
         return {
             "max_file_size_mb": RENDER_CONFIG["STARTER_MAX_MB"],
-            "whisper_model": RENDER_CONFIG["STARTER_MODEL"],
+            "whisper_model": "base",  # Force base model for reliability
             "memory_limit_mb": 450,
         }
 
