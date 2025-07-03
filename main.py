@@ -40,6 +40,26 @@ app = FastAPI(
     version="1.1.0"
 )
 
+# Add URL normalization middleware to handle double slashes
+from fastapi import Request
+from fastapi.responses import RedirectResponse
+
+@app.middleware("http")
+async def normalize_url_middleware(request: Request, call_next):
+    """Normalize URLs by removing double slashes and handling common URL issues"""
+    url_path = str(request.url.path)
+    
+    # Fix double slashes (//upload -> /upload)
+    if "//" in url_path and url_path != "/":
+        normalized_path = url_path.replace("//", "/")
+        # Redirect to normalized URL
+        query_string = str(request.url.query)
+        new_url = f"{normalized_path}{'?' + query_string if query_string else ''}"
+        return RedirectResponse(url=new_url, status_code=307)  # 307 preserves POST method
+    
+    response = await call_next(request)
+    return response
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -193,6 +213,7 @@ async def frontend():
         raise HTTPException(status_code=404, detail="Frontend file not found")
 
 @app.post("/upload")
+@app.post("/upload/")  # Handle trailing slash
 async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """
     Upload an audio file and get back an SRT subtitle file
