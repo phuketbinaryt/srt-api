@@ -5,12 +5,15 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import aiofiles
-from typing import List
+from typing import List, Dict, Optional
 import re
-from datetime import timedelta
+from datetime import timedelta, datetime
 import asyncio
 import gc
 import psutil
+import uuid
+import json
+from enum import Enum
 try:
     from render_config import get_instance_config, get_optimized_whisper_params
 except ImportError:
@@ -33,6 +36,16 @@ except ImportError:
             "logprob_threshold": -1.0,  # More conservative threshold
             "no_speech_threshold": 0.6,  # Higher threshold for silence
         }
+
+# Job status enumeration
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+# In-memory job storage (in production, use Redis or database)
+jobs: Dict[str, Dict] = {}
 
 app = FastAPI(
     title="Audio Transcription API",
@@ -189,6 +202,103 @@ def create_srt_content(segments: List[dict]) -> str:
     
     return srt_content
 
+async def process_transcription_job(job_id: str, temp_audio_path: str, filename: str):
+    """Background task to process transcription"""
+    try:
+        # Update job status to processing
+        jobs[job_id]["status"] = JobStatus.PROCESSING
+        jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
+        
+        print(f"Starting transcription job {job_id}")
+        
+        # Load model
+        whisper_model = get_model()
+        
+        # Transcribe audio
+        whisper_params = get_optimized_whisper_params()
+        result = whisper_model.transcribe(
+            temp_audio_path,
+            task="transcribe",
+            language=None,
+            **whisper_params
+        )
+        
+        # Convert to SRT
+        srt_content = create_srt_content(result['segments'])
+        
+        # Save SRT file
+        srt_filename = f"{os.path.splitext(filename)[0]}_subtitles.srt"
+        srt_path = f"/tmp/{job_id}_{srt_filename}"
+        
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(srt_content)
+        
+        # Update job with results
+        jobs[job_id].update({
+            "status": JobStatus.COMPLETED,
+            "completed_at": datetime.utcnow().isoformat(),
+            "srt_path": srt_path,
+            "srt_filename": srt_filename,
+            "segments_count": len(result['segments']),
+            "detected_language": result.get('language', 'unknown')
+        })
+        
+        print(f"Transcription job {job_id} completed successfully")
+        
+    except Exception as e:
+        # Update job with error
+        jobs[job_id].update({
+            "status": JobStatus.FAILED,
+            "completed_at": datetime.utcnow().isoformat(),
+            "error": str(e)
+        })
+        print(f"Transcription job {job_id} failed: {e}")
+    
+    finally:
+        # Clean up temp audio file
+        cleanup_temp_files(temp_audio_path)
+        gc.collect()
+
+def create_job(filename: str, file_size: int) -> str:
+    """Create a new transcription job"""
+    job_id = str(uuid.uuid4())
+    
+    jobs[job_id] = {
+        "id": job_id,
+        "filename": filename,
+        "file_size": file_size,
+        "status": JobStatus.PENDING,
+        "created_at": datetime.utcnow().isoformat(),
+        "started_at": None,
+        "completed_at": None,
+        "srt_path": None,
+        "srt_filename": None,
+        "segments_count": None,
+        "detected_language": None,
+        "error": None
+    }
+    
+    return job_id
+
+def cleanup_old_jobs():
+    """Clean up jobs older than 24 hours"""
+    cutoff_time = datetime.utcnow() - timedelta(hours=24)
+    
+    jobs_to_remove = []
+    for job_id, job in jobs.items():
+        created_at = datetime.fromisoformat(job["created_at"])
+        if created_at < cutoff_time:
+            # Clean up SRT file if it exists
+            if job.get("srt_path") and os.path.exists(job["srt_path"]):
+                cleanup_temp_files(job["srt_path"])
+            jobs_to_remove.append(job_id)
+    
+    for job_id in jobs_to_remove:
+        del jobs[job_id]
+    
+    if jobs_to_remove:
+        print(f"Cleaned up {len(jobs_to_remove)} old jobs")
+
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -211,6 +321,161 @@ async def frontend():
         return HTMLResponse(content=content)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Frontend file not found")
+
+@app.post("/jobs")
+@app.post("/jobs/")
+async def submit_transcription_job(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """
+    Submit an audio file for transcription and get a job ID for polling
+    
+    - **file**: Audio file in supported format (mp3, wav, m4a, flac, ogg, wma)
+    - Returns: Job ID and status for polling
+    """
+    try:
+        # Clean up old jobs periodically
+        cleanup_old_jobs()
+        
+        # Check memory before processing
+        initial_memory = get_memory_usage()
+        print(f"Initial memory usage: {initial_memory:.1f}MB")
+        
+        # Validate file format
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+        
+        file_extension = os.path.splitext(file.filename)[1].lower()
+        if file_extension not in SUPPORTED_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format. Supported formats: {', '.join(SUPPORTED_FORMATS)}"
+            )
+        
+        # Read file in chunks to avoid memory issues
+        file_size = 0
+        temp_audio_fd, temp_audio_path = tempfile.mkstemp(suffix=file_extension)
+        
+        try:
+            with os.fdopen(temp_audio_fd, 'wb') as temp_file:
+                while chunk := await file.read(8192):  # Read in 8KB chunks
+                    file_size += len(chunk)
+                    if file_size > MAX_FILE_SIZE:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"File too large. Maximum size: {MAX_FILE_SIZE // (1024 * 1024)}MB"
+                        )
+                    temp_file.write(chunk)
+        except Exception as e:
+            cleanup_temp_files(temp_audio_path)
+            raise e
+        
+        print(f"File size: {file_size / (1024 * 1024):.1f}MB")
+        
+        # Create job
+        job_id = create_job(file.filename, file_size)
+        
+        # Start background processing
+        background_tasks.add_task(process_transcription_job, job_id, temp_audio_path, file.filename)
+        
+        return {
+            "job_id": job_id,
+            "status": JobStatus.PENDING,
+            "message": "Transcription job submitted successfully",
+            "filename": file.filename,
+            "file_size_mb": round(file_size / (1024 * 1024), 2),
+            "estimated_time_minutes": round(file_size / (1024 * 1024) * 0.5, 1)  # Rough estimate
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Job submission error: {error_msg}")
+        raise HTTPException(status_code=500, detail=f"Failed to submit job: {error_msg}")
+
+@app.get("/jobs/{job_id}")
+async def get_job_status(job_id: str):
+    """
+    Get the status of a transcription job
+    
+    - **job_id**: The job ID returned from job submission
+    - Returns: Job status and details
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = jobs[job_id].copy()
+    
+    # Calculate processing time if applicable
+    if job["started_at"]:
+        started_at = datetime.fromisoformat(job["started_at"])
+        if job["completed_at"]:
+            completed_at = datetime.fromisoformat(job["completed_at"])
+            job["processing_time_seconds"] = (completed_at - started_at).total_seconds()
+        else:
+            job["processing_time_seconds"] = (datetime.utcnow() - started_at).total_seconds()
+    
+    # Remove internal paths from response
+    job.pop("srt_path", None)
+    
+    return job
+
+@app.get("/jobs/{job_id}/download")
+async def download_srt_file(job_id: str):
+    """
+    Download the SRT file for a completed transcription job
+    
+    - **job_id**: The job ID returned from job submission
+    - Returns: SRT file download
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = jobs[job_id]
+    
+    if job["status"] != JobStatus.COMPLETED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not completed. Current status: {job['status']}"
+        )
+    
+    srt_path = job.get("srt_path")
+    if not srt_path or not os.path.exists(srt_path):
+        raise HTTPException(status_code=404, detail="SRT file not found")
+    
+    return FileResponse(
+        path=srt_path,
+        filename=job["srt_filename"],
+        media_type='application/x-subrip'
+    )
+
+@app.get("/jobs")
+async def list_jobs(limit: int = 10, status: Optional[JobStatus] = None):
+    """
+    List recent transcription jobs
+    
+    - **limit**: Maximum number of jobs to return (default: 10)
+    - **status**: Filter by job status (optional)
+    - Returns: List of jobs
+    """
+    # Clean up old jobs
+    cleanup_old_jobs()
+    
+    # Filter and sort jobs
+    filtered_jobs = []
+    for job in jobs.values():
+        if status is None or job["status"] == status:
+            job_copy = job.copy()
+            job_copy.pop("srt_path", None)  # Remove internal paths
+            filtered_jobs.append(job_copy)
+    
+    # Sort by creation time (newest first)
+    filtered_jobs.sort(key=lambda x: x["created_at"], reverse=True)
+    
+    return {
+        "jobs": filtered_jobs[:limit],
+        "total": len(filtered_jobs),
+        "active_jobs": len([j for j in jobs.values() if j["status"] in [JobStatus.PENDING, JobStatus.PROCESSING]])
+    }
 
 @app.post("/upload")
 @app.post("/upload/")  # Handle trailing slash
