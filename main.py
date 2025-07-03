@@ -181,6 +181,17 @@ async def root():
         "model_loaded": model is not None
     }
 
+@app.get("/frontend.html")
+async def frontend():
+    """Serve the frontend HTML file"""
+    from fastapi.responses import HTMLResponse
+    try:
+        with open("frontend.html", "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content=content)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Frontend file not found")
+
 @app.post("/upload")
 async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """
